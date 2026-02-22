@@ -30,7 +30,7 @@ fi
 # Check Python packages
 echo -n "✓ Checking Python dependencies... "
 MISSING=0
-for pkg in openai python-dotenv PyGithub httpx fastapi uvicorn; do
+for pkg in python-dotenv PyGithub httpx fastapi uvicorn mcp; do
     python3 -c "import ${pkg//-/_}" 2>/dev/null || MISSING=$((MISSING+1))
 done
 if [ $MISSING -eq 0 ]; then

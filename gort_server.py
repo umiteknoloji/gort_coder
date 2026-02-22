@@ -12,12 +12,12 @@ import os
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
-from openai import OpenAI
+import httpx
 from pydantic import BaseModel
 from typing import Optional, List
 
 # Import Gort tools
-from tools import TOOLS_SCHEMA, execute_tool
+from mcp_tools import initialize_mcp, get_mcp_manager
 
 # Configuration
 load_dotenv()
@@ -37,6 +37,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# MCP initialization on startup
+@app.on_event("startup")
+async def startup_event():
+    try:
+        await initialize_mcp()
+    except Exception as e:
+        # Don't block server startup if MCP fails
+        print(f"⚠️ MCP initialization failed: {e}")
 
 # Pydantic models
 class Message(BaseModel):
@@ -62,8 +71,12 @@ SESSIONS = {}  # session_id -> conversation
 
 
 def get_available_tools() -> set:
-    """Get all available tool names from TOOLS_SCHEMA"""
-    return {tool["function"]["name"] for tool in TOOLS_SCHEMA}
+    """Get all available tool names from MCP manager (if initialized)."""
+    try:
+        manager = get_mcp_manager()
+        return set(manager.tools.keys())
+    except Exception:
+        return set()
 
 
 def load_constitution() -> str:
@@ -85,12 +98,58 @@ def create_new_session() -> str:
     return session_id
 
 
+def get_chat_completions_url() -> str:
+    """Build chat completions URL from base."""
+    return f"{BASE_URL.rstrip('/')}/chat/completions"
+
+
+async def call_deepseek(
+    messages: list,
+    tools: Optional[list] = None,
+    tool_choice: Optional[str] = None
+) -> dict:
+    """Call DeepSeek Chat Completions API (OpenAI-compatible) via httpx."""
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY not configured")
+    
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": 2000,
+    }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+    
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(get_chat_completions_url(), headers=headers, json=payload)
+    
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"API Error: {resp.status_code} {resp.text}")
+    
+    return resp.json()
+
+
 async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[str]]:
     """
     Chat with Gort and return response + tool name (if used)
     """
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     constitution = load_constitution()
+    
+    # Get MCP tools (if available)
+    tools = []
+    try:
+        manager = get_mcp_manager()
+        tools = manager.get_tools_for_llm()
+    except Exception:
+        manager = None
     
     # Get or create session
     if session_id not in SESSIONS:
@@ -106,30 +165,25 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
     
     try:
         # Call DeepSeek with tools
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": constitution},
-                *session["messages"]
-            ],
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto",
-            temperature=0.5,
-            max_tokens=2000
+        response = await call_deepseek(
+            messages=[{"role": "system", "content": constitution}, *session["messages"]],
+            tools=tools if tools else None,
+            tool_choice="auto" if tools else None
         )
         
-        assistant_message = response.choices[0].message
+        assistant_message = response["choices"][0]["message"]
         tool_used = None
         
         # Handle tool calls
-        if assistant_message.tool_calls:
-            tool_used = assistant_message.tool_calls[0].function.name
+        tool_calls = assistant_message.get("tool_calls")
+        if tool_calls:
+            tool_used = tool_calls[0]["function"]["name"]
             available_tools = get_available_tools()
             
             # Execute tool
             tool_results = []
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
+            for tool_call in tool_calls:
+                tool_name = tool_call["function"]["name"]
                 
                 try:
                     # VALIDATE: Check if tool exists
@@ -138,9 +192,14 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                         tool_results.append(f"\n[{tool_name}]\n{error_msg}")
                         continue
                     
-                    arguments = json.loads(tool_call.function.arguments) if isinstance(tool_call.function.arguments, str) else tool_call.function.arguments
+                    raw_args = tool_call["function"].get("arguments", {})
+                    arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     
-                    result = await execute_tool(tool_name, arguments)
+                    if manager is None:
+                        tool_results.append(f"\n[{tool_name}]\n❌ MCP manager not initialized")
+                        continue
+                    
+                    result = await manager.execute_tool(tool_name, arguments)
                     tool_results.append(f"\n[{tool_name}]\n{result}")
                 except json.JSONDecodeError as e:
                     error_msg = f"❌ ARGUMENT HATASI: {tool_name} tool'unun argümanları parse edilemedi: {e}"
@@ -149,28 +208,38 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                     error_msg = f"❌ EXECUTION HATASI: {tool_name} tool'u çalıştırırken hata: {e}"
                     tool_results.append(f"\n[{tool_name}]\n{error_msg}")
             
-            # Add tool execution to history
+            # Add assistant tool call in structured format
             session["messages"].append({
                 "role": "assistant",
-                "content": f"Calling {tool_used}..."
+                "content": assistant_message.get("content") or "",
+                "tool_calls": [
+                    {
+                        "id": tc.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"].get("arguments", {}),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
             })
-            session["messages"].append({
-                "role": "assistant",
-                "content": "".join(tool_results)
-            })
+
+            # Add each tool result as role=tool so model can ground follow-up answer
+            for tool_call, result in zip(tool_calls, tool_results):
+                session["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "name": tool_call["function"]["name"],
+                    "content": result,
+                })
             
             # Get final response after tool execution
-            final_response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": constitution},
-                    *session["messages"]
-                ],
-                temperature=0.5,
-                max_tokens=2000
+            final_response = await call_deepseek(
+                messages=[{"role": "system", "content": constitution}, *session["messages"]]
             )
             
-            response_text = final_response.choices[0].message.content
+            response_text = final_response["choices"][0]["message"]["content"]
             session["messages"].append({
                 "role": "assistant",
                 "content": response_text
@@ -179,7 +248,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
             return response_text, tool_used
         else:
             # Regular response (no tools)
-            response_text = assistant_message.content
+            response_text = assistant_message.get("content", "")
             session["messages"].append({
                 "role": "assistant",
                 "content": response_text
@@ -265,7 +334,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 @app.get("/tools")
 async def list_tools():
     """Get available tools for the frontend"""
-    return {"tools": TOOLS_SCHEMA}
+    try:
+        manager = get_mcp_manager()
+        return {"tools": manager.get_tools_for_llm()}
+    except Exception:
+        return {"tools": []}
 
 
 @app.get("/constitution")

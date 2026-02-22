@@ -47,7 +47,7 @@ function App() {
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || !sessionId) return;
+    if (!input.trim()) return;
 
     const userMessage = input.trim();
     setInput('');
@@ -57,9 +57,12 @@ function App() {
     try {
       const response = await axios.post<ChatResponse>(`${API_URL}/chat`, {
         message: userMessage,
-        session_id: sessionId,
+        session_id: sessionId || undefined,
       });
 
+      if (!sessionId && response.data.session_id) {
+        setSessionId(response.data.session_id);
+      }
       setMessages(prev => [
         ...prev,
         {
