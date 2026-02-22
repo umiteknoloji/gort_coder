@@ -35,11 +35,24 @@ def load_constitution():
 
 
 def load_memory():
-    """Load conversation history from memory.json"""
+    """Load conversation history from memory.json (supports legacy format)."""
     if Path(MEMORY_FILE).exists():
         try:
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            # New multi-session format
+            if isinstance(data, dict) and "sessions" in data:
+                sessions = data.get("sessions", {})
+                last_id = data.get("last_session_id")
+                if last_id and last_id in sessions:
+                    return sessions[last_id]
+                # Fallback: pick any session
+                if sessions:
+                    return next(iter(sessions.values()))
+                return create_new_session()
+            # Legacy single-session format
+            if isinstance(data, dict) and "session_id" in data and "messages" in data:
+                return data
         except (json.JSONDecodeError, IOError) as e:
             print(f"⚠️  Uyarı: Bellek yüklenemedi ({e}), temiz başlat")
             return create_new_session()
@@ -57,11 +70,28 @@ def create_new_session():
 
 
 def save_memory(session):
-    """Save conversation history to memory.json"""
+    """Save conversation history to memory.json (multi-session format)."""
     try:
         session["last_updated"] = datetime.now().isoformat()
+        existing = {"sessions": {}, "last_session_id": None}
+        if Path(MEMORY_FILE).exists():
+            try:
+                with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {"sessions": {}, "last_session_id": None}
+        
+        sessions = existing.get("sessions") if isinstance(existing, dict) else {}
+        if not isinstance(sessions, dict):
+            sessions = {}
+        
+        sessions[session["session_id"]] = session
+        payload = {
+            "last_session_id": session["session_id"],
+            "sessions": sessions
+        }
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(session, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"\n⚠️  Uyarı: Bellek kaydedilemedi ({e})")
 

@@ -68,6 +68,51 @@ class SessionData(BaseModel):
 
 # Global state
 SESSIONS = {}  # session_id -> conversation
+LAST_SESSION_ID: Optional[str] = None
+
+
+def load_sessions_from_disk() -> dict:
+    """Load sessions from memory.json (supports legacy single-session format)."""
+    global LAST_SESSION_ID
+    if not Path(MEMORY_FILE).exists():
+        return {}
+    try:
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    
+    if isinstance(data, dict) and "sessions" in data and isinstance(data["sessions"], dict):
+        LAST_SESSION_ID = data.get("last_session_id")
+        return data["sessions"]
+    
+    # Legacy format: single session
+    if isinstance(data, dict) and "session_id" in data and "messages" in data:
+        LAST_SESSION_ID = data.get("session_id")
+        return {data["session_id"]: data}
+    
+    return {}
+
+
+def save_sessions_to_disk(last_session_id: Optional[str] = None) -> None:
+    """Persist sessions to memory.json in multi-session format."""
+    global LAST_SESSION_ID
+    if last_session_id:
+        LAST_SESSION_ID = last_session_id
+    payload = {
+        "last_session_id": LAST_SESSION_ID,
+        "sessions": SESSIONS,
+    }
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # Don't crash the server on persistence errors
+        pass
+
+
+# Load sessions at import time
+SESSIONS = load_sessions_from_disk()
 
 
 def get_available_tools() -> set:
@@ -93,9 +138,18 @@ def create_new_session() -> str:
     SESSIONS[session_id] = {
         "session_id": session_id,
         "created_at": datetime.now().isoformat(),
+        "last_updated": datetime.now().isoformat(),
         "messages": []
     }
+    save_sessions_to_disk(session_id)
     return session_id
+
+
+def touch_session(session_id: str) -> None:
+    """Update last_updated and persist sessions."""
+    if session_id in SESSIONS:
+        SESSIONS[session_id]["last_updated"] = datetime.now().isoformat()
+        save_sessions_to_disk(session_id)
 
 
 def get_chat_completions_url() -> str:
@@ -162,6 +216,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
         "role": "user",
         "content": message
     })
+    touch_session(session_id)
     
     try:
         # Call DeepSeek with tools
@@ -224,6 +279,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                     for tc in tool_calls
                 ],
             })
+            touch_session(session_id)
 
             # Add each tool result as role=tool so model can ground follow-up answer
             for tool_call, result in zip(tool_calls, tool_results):
@@ -233,6 +289,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                     "name": tool_call["function"]["name"],
                     "content": result,
                 })
+            touch_session(session_id)
             
             # Get final response after tool execution
             final_response = await call_deepseek(
@@ -244,6 +301,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                 "role": "assistant",
                 "content": response_text
             })
+            touch_session(session_id)
             
             return response_text, tool_used
         else:
@@ -253,6 +311,7 @@ async def chat_with_gort(message: str, session_id: str) -> tuple[str, Optional[s
                 "role": "assistant",
                 "content": response_text
             })
+            touch_session(session_id)
             
             return response_text, None
             
