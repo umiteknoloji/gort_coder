@@ -43,7 +43,7 @@ app.add_middleware(
 async def startup_event():
     try:
         await initialize_mcp()
-    except Exception as e:
+    except BaseException as e:
         # Don't block server startup if MCP fails
         print(f"⚠️ MCP initialization failed: {e}")
 

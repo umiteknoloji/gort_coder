@@ -15,6 +15,17 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+# Ensure venv + dependencies
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+else
+    echo -e "${YELLOW}⚠️  .venv bulunamadı, oluşturuluyor...${NC}"
+    python3 -m venv .venv
+    source .venv/bin/activate
+fi
+
+pip install -r requirements.txt >/dev/null 2>&1
+
 # Check if Node.js is available
 if ! command -v node &> /dev/null; then
     echo -e "${YELLOW}❌ Node.js bulunamadı${NC}"
@@ -38,6 +49,7 @@ fi
 # Start Electron app
 echo -e "${GREEN}🖥️  Electron uygulaması başlatılıyor...${NC}"
 cd electron-app
+export BROWSER=none
 npm run dev &
 ELECTRON_PID=$!
 

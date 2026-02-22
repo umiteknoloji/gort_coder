@@ -41,8 +41,8 @@ class MCPToolManager:
             
             # GitHub MCP server'ı stdio ile çalıştır
             server_params = StdioServerParameters(
-                command="python",
-                args=["-m", "mcp_github.server"],
+                command=sys.executable,
+                args=[str(Path(__file__).parent / "github_mcp_server.py")],
                 env={"GITHUB_TOKEN": GITHUB_TOKEN}
             )
             
@@ -65,7 +65,7 @@ class MCPToolManager:
             print(f"✅ GitHub MCP Server bağlandı ({len(tools_response.tools)} tools)")
             return True
             
-        except Exception as e:
+        except BaseException as e:
             print(f"❌ GitHub MCP Server bağlanamadı: {e}")
             return False
     
@@ -78,7 +78,7 @@ class MCPToolManager:
             
             # Vercel MCP server'ını stdio ile çalıştır
             server_params = StdioServerParameters(
-                command="python",
+                command=sys.executable,
                 args=[str(Path(__file__).parent / "vercel_mcp_server.py")],
                 env={"VERCEL_API_KEY": VERCEL_API_KEY}
             )
@@ -102,7 +102,7 @@ class MCPToolManager:
             print(f"✅ Vercel MCP Server bağlandı ({len(tools_response.tools)} tools)")
             return True
             
-        except Exception as e:
+        except BaseException as e:
             print(f"❌ Vercel MCP Server bağlanamadı: {e}")
             return False
     
